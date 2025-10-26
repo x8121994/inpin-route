@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Route Optimizer + GPS - Nearest Neighbor</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <style>
+    html,body{height:100%;margin:0;font-family:Arial}
+    #map{height:60%}
+    #panel{padding:10px}
+    textarea{width:100%;height:120px;font-family:monospace}
+    button{padding:8px 12px;margin-top:8px}
+    .small{font-size:13px;color:#666}
+    #distances{margin-top:10px;font-size:14px;}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <div class="small">Paste coordinates with names (one per line) like: <code>Juan,18.4500,-67.0667</code></div>
+  <textarea id="coords" placeholder="Ejemplo:&#10;Juan,18.4500,-67.0667&#10;Pedro,18.4567,-67.0700"></textarea>
+  <button id="calc">🚀 Calcular ruta por cercanía</button>
+  <button id="clear">🗑️ Limpiar mapa</button>
+  <div id="status" class="small"></div>
+  <div id="distances" class="small"></div>
+</div>
+
+<script>
+const map = L.map('map').setView([18.4500,-67.0667], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+let routeLayer = null;
+let markers = [];
+let gpsMarker = null;
+
+// Euclidean distance approx
+function distance(lat1, lon1, lat2, lon2){
+  const R = 6371; 
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c; 
+}
+
+// Nearest neighbor order
+function nearestNeighbor(coords){
+  const remaining = coords.slice(1).map((c,i)=>({coord:c,index:i+1}));
+  const order = [0];
+  let current = coords[0];
+  while(remaining.length){
+    let nearestIdx = 0;
+    let nearestDist = distance(current[1], current[0], remaining[0].coord[1], remaining[0].coord[0]);
+    for(let i=1;i<remaining.length;i++){
+      const d = distance(current[1], current[0], remaining[i].coord[1], remaining[i].coord[0]);
+      if(d<nearestDist){ nearestDist=d; nearestIdx=i; }
+    }
+    order.push(remaining[nearestIdx].index);
+    current = remaining[nearestIdx].coord;
+    remaining.splice(nearestIdx,1);
+  }
+  return order;
+}
+
+function clearMap(){
+  if(routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  if(gpsMarker){ map.removeLayer(gpsMarker); gpsMarker=null;}
+  document.getElementById('status').innerText = '';
+  document.getElementById('distances').innerText = '';
+}
+
+// Update distances from current GPS position
+function updateDistances(lat, lon, coords, names, order){
+  let text = '';
+  for(let i=1;i<order.length;i++){
+    const idx = order[i];
+    const c = coords[idx];
+    const d = distance(lat, lon, c[1], c[0]);
+    text += names[idx] + ': '+d.toFixed(2)+' km\n';
+  }
+  document.getElementById('distances').innerText = text;
+}
+
+// Watch GPS position
+function startGPS(coords, names, order){
+  if(!navigator.geolocation){
+    alert('GPS no disponible en este dispositivo');
+    return;
+  }
+  navigator.geolocation.watchPosition(pos=>{
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    if(!gpsMarker){
+      gpsMarker = L.marker([lat, lon], {icon: L.icon({iconUrl:'https://maps.google.com/mapfiles/ms/icons/red-dot.png',iconSize:[32,32]})}).addTo(map).bindPopup('Tu posición');
+    } else {
+      gpsMarker.setLatLng([lat, lon]);
+    }
+    map.setView([lat, lon]);
+    updateDistances(lat, lon, coords, names, order);
+  }, err=>{ console.log(err); }, {enableHighAccuracy:true, maximumAge:1000});
+}
+
+document.getElementById('clear').addEventListener('click', clearMap);
+
+document.getElementById('calc').addEventListener('click', async ()=>{
+  clearMap();
+  const raw = document.getElementById('coords').value.trim();
+  if(!raw){ alert('Pega las coordenadas primero'); return; }
+  const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
+  const coords = [];
+  const names = [];
+  for(const ln of lines){
+    const p = ln.split(',');
+    if(p.length!==3) { alert('Formato inválido en: ' + ln); return; }
+    const lat = parseFloat(p[1].trim());
+    const lon = parseFloat(p[2].trim());
+    if(isNaN(lat) || isNaN(lon)) { alert('Coordenadas inválidas en: ' + ln); return; }
+    coords.push([lon, lat]);
+    names.push(p[0].trim());
+  }
+  if(coords.length===0){ alert('No hay coords'); return; }
+
+  const order = nearestNeighbor(coords);
+
+  const routeCoords = [];
+  order.forEach((idx,i)=>{
+    const c = coords[idx];
+    routeCoords.push([c[1], c[0]]);
+    const label = (i===0)? 'Start: '+names[idx] : names[idx] + ' (P'+i+')';
+    const m = L.marker([c[1], c[0]]).addTo(map).bindPopup(label);
+    markers.push(m);
+  });
+
+  routeLayer = L.polyline(routeCoords, { color:'#0078ff', weight:5, opacity:0.8 }).addTo(map);
+  map.fitBounds(routeLayer.getBounds(), {padding:[40,40]});
+  document.getElementById('status').innerText = 'Ruta calculada por cercanía. Total puntos: '+coords.length;
+
+  startGPS(coords, names, order);
+});
+</script>
+</body>
+</html>
